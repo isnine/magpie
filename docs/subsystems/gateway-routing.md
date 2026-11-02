@@ -11,6 +11,17 @@ This page covers how a request is routed. Plugins that change requests and
 replies are in [Gateway middleware](gateway-middleware.md). Subscriptions
 served by a plugin are in [Provider and plugin ownership](provider-plugins.md).
 
+On Responses routes to OpenAI, Azure OpenAI, ChatGPT and Copilot, input item
+ids longer than 64 characters are shortened deterministically by
+`plainItemIDs` and `boundItemID` in
+[`codex_backend.go`](../../internal/gateway/codex_backend.go). Known item
+types supply their required prefix (`msg_`, `rs_`, `fc_`, `ctc_`, `tsc_`),
+including when the original id is opaque Base64 with no prefix. A bare
+digest fits the length limit but Copilot refuses it with
+`invalid_request_body`. Short valid ids, message content and `call_id`
+pairing are unchanged. Existing conversations are repaired on their next
+request without rewriting the client's history.
+
 WorkBuddy and CodeBuddy Code's `X-Conversation-ID` is a native session header
 in `sessionHeaders` (`sessionOf`, `nativeSessionOf`, `conversationID` in
 [`gateway.go`](../../internal/gateway/gateway.go)). It keeps their requests

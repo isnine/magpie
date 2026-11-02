@@ -38,7 +38,8 @@ var openaiItemID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // idChecker plays OpenAI's /responses as Copilot passes it on: an input
 // item whose id has another character is refused with OpenAI's 400, word
 // for word as echo_ts got it (Copilot's name is magpie's, before it).
-// With check off it takes any id, as OpenCode does its own.
+// A missing type prefix gets Copilot's bare 400. With check off it takes
+// any id, as OpenCode does its own.
 type idChecker struct {
 	mu     sync.Mutex
 	check  bool
@@ -71,6 +72,14 @@ func (u *idChecker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			io.WriteString(w, `{"error":{"message":"Invalid 'input[`+mustString(int64(i))+`].id': string too long. Expected a string with maximum length 64, but got a string with length `+mustString(int64(len(id)))+` instead.","type":"invalid_request_error","param":"input[`+mustString(int64(i))+`].id","code":"string_too_long"}}`)
+			return
+		}
+		typ, _ := it["type"].(string)
+		prefix := map[string]string{"message": "msg_", "reasoning": "rs_", "function_call": "fc_"}[typ]
+		if prefix != "" && !strings.HasPrefix(id, prefix) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":{"message":"","code":"invalid_request_body"}}`)
 			return
 		}
 	}
@@ -232,13 +241,10 @@ func TestCodexOwnModelTakesAnotherVendorsItemIDs(t *testing.T) {
 }
 
 // copilotLongMessageID and copilotLongReasoningID are ids of the lengths
-// Copilot hands out and Codex carries back: 444 as ghjkllasdf-fake
-// recorded from an approval session (#4527), 420 as isnine's three
-// sessions each showed (#4525) — every one of the characters OpenAI
-// takes an id of, so only their length makes an upstream that checks
-// ids turn the request away.
+// Codex carries back: an opaque Base64 message id of 420 characters as
+// isnine recorded, and a prefixed reasoning id of the same length.
 var (
-	copilotLongMessageID   = "msg_" + strings.Repeat("A", 440)
+	copilotLongMessageID   = strings.Repeat("Ab+/", 105)
 	copilotLongReasoningID = "rs_" + strings.Repeat("b", 417)
 )
 
@@ -459,5 +465,61 @@ func TestPlainItemIDsBoundItemIDs(t *testing.T) {
 		if id != want {
 			t.Errorf("a cut id was cut again: %q then %q", want, id)
 		}
+	}
+}
+
+func TestPlainItemIDsOpaqueKinds(t *testing.T) {
+	for _, tt := range []struct {
+		typ, prefix string
+	}{
+		{"message", "msg_"},
+		{"", "msg_"},
+		{"reasoning", "rs_"},
+		{"function_call", "fc_"},
+		{"custom_tool_call", "ctc_"},
+		{"tool_search_call", "tsc_"},
+	} {
+		t.Run(tt.typ, func(t *testing.T) {
+			item := map[string]any{"id": strings.Repeat("A", 442) + "==", "type": tt.typ}
+			switch tt.typ {
+			case "", "message":
+				item["role"] = "assistant"
+				item["content"] = []any{map[string]any{"type": "output_text", "text": "OK"}}
+			case "reasoning":
+				item["id"] = strings.Repeat("A", 420)
+				item["encrypted_content"] = "sealed"
+				item["summary"] = []any{}
+			case "custom_tool_call":
+				item["call_id"], item["name"], item["input"] = "call_keep", "apply_patch", "patch"
+			case "tool_search_call":
+				item["call_id"], item["execution"] = "call_keep", "client"
+				item["arguments"] = map[string]any{"query": "search"}
+			case "function_call":
+				item["call_id"], item["name"], item["arguments"] = "call_keep", "shell", "{}"
+			}
+			if tt.typ == "" {
+				delete(item, "type")
+			}
+			body := mustJSON(map[string]any{"input": []any{item}})
+			got := plainItemIDs(body)
+			var q struct {
+				Input []map[string]any `json:"input"`
+			}
+			if err := json.Unmarshal(got, &q); err != nil || len(q.Input) != 1 {
+				t.Fatalf("item lost: %s (%v)", got, err)
+			}
+			id, _ := q.Input[0]["id"].(string)
+			if !strings.HasPrefix(id, tt.prefix) || len(id) > 64 || !openaiItemID.MatchString(id) {
+				t.Errorf("bounded %s id %q lacks its prefix or exceeds the limit", tt.typ, id)
+			}
+			delete(item, "id")
+			delete(q.Input[0], "id")
+			if !bytes.Equal(mustJSON(item), mustJSON(q.Input[0])) {
+				t.Errorf("non-ID fields changed: %s", got)
+			}
+			if next := plainItemIDs(got); !bytes.Equal(got, next) {
+				t.Errorf("bounded id changed again: %s", next)
+			}
+		})
 	}
 }

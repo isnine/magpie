@@ -2819,16 +2819,27 @@ const itemIDCap = 64
 
 // boundItemID is id, of at most itemIDCap characters, as an upstream that
 // checks item ids takes it: one longer goes as its kind's prefix ("msg_",
-// "rs_") and the sha256 of the whole of it, cut to fit. The same id goes
-// to the same shorter one every turn, and no two ids land on one (a plain
-// cut could: ids of a vendor can begin alike).
-func boundItemID(id string) string {
+// "rs_") and the sha256 of the whole of it, cut to fit. Opaque Copilot ids
+// have no prefix, so a known item's type supplies it. The same id and
+// type go to the same shorter one every turn.
+func boundItemID(id, typ string) string {
 	sum := sha256.Sum256([]byte(id))
 	digest := hex.EncodeToString(sum[:])
-	if i := strings.IndexByte(id, '_'); i > 0 && i <= 4 && safeID([]byte(id[:i])) {
-		return id[:i+1] + digest[:itemIDCap-i-1]
+	prefix := openaiItemPrefix[typ]
+	switch typ {
+	case "", "message":
+		prefix = "msg_"
+	case "reasoning":
+		prefix = "rs_"
+	case "function_call":
+		prefix = "fc_"
 	}
-	return digest
+	if prefix == "" {
+		if i := strings.IndexByte(id, '_'); i > 0 && i <= 4 && safeID([]byte(id[:i])) {
+			prefix = id[:i+1]
+		}
+	}
+	return prefix + digest[:itemIDCap-len(prefix)]
 }
 
 // plainItemIDs is a Responses request whose input items' ids are of
@@ -2880,7 +2891,7 @@ func plainItemIDs(body []byte) []byte {
 			continue
 		}
 		if len(id) > itemIDCap {
-			id = boundItemID(id)
+			id = boundItemID(id, typ)
 		} else {
 			id = unsafeToolID.ReplaceAllString(id, "_")
 		}
